@@ -37,6 +37,32 @@ struct RackWidget::Internal {
 	math::Vec selectionEnd;
 	std::set<ModuleWidget*> selectedModules;
 	std::map<widget::Widget*, math::Vec> moduleOldPositions;
+
+	bool multiPatching = false;
+	/** Type of the free end of the collected cables, so the type of port they are patched into. */
+	engine::Port::Type multiPatchFreeType = engine::Port::INPUT;
+	/** Whether the collected cables' free ends are the plugs at the ports that were clicked, which
+	is the case when they were unplugged or duplicated rather than newly created. Further clicks on
+	ports of the free type then take more cables instead of patching.
+	*/
+	bool multiPatchGrabMode = false;
+	/** A collected port, with the cable that follows the cursor until it is patched. */
+	struct MultiPatchPort {
+		WeakPtr<PortWidget> port;
+		WeakPtr<CableWidget> cable;
+		/** Port the cable was grabbed from, so it can be put back if it is never patched. */
+		WeakPtr<PortWidget> grabbedPort;
+		/** Owned. Pushed to the history if the grabbed cable is patched, deleted if it is put back. */
+		history::CableRemove* grabHistory = NULL;
+	};
+	/** Collected ports, in the order they will be patched. */
+	std::vector<MultiPatchPort> multiPatchPorts;
+	/** Index of the next collected port to be patched.
+	Zero while still collecting ports.
+	*/
+	size_t multiPatchIndex = 0;
+	/** Created when multi-patching starts, pushed to the history when it ends. */
+	history::ComplexAction* multiPatchHistory = NULL;
 };
 
 
@@ -134,6 +160,26 @@ RackWidget::~RackWidget() {
 }
 
 void RackWidget::step() {
+	// Stop multi-patching if the setting was disabled
+	if (internal->multiPatching && !settings::multiPatch)
+		endMultiPatch();
+
+	// Snap the next multi-patch cable to the hovered port, like a dragged cable
+	if (internal->multiPatching) {
+		widget::Widget* hoveredWidget = APP->event->getDraggedWidget() ? APP->event->getDragHoveredWidget() : APP->event->getHoveredWidget();
+		PortWidget* hoveredPw = dynamic_cast<PortWidget*>(hoveredWidget);
+		if (hoveredPw && !(canMultiPatchPort(hoveredPw) && hoveredPw->type == internal->multiPatchFreeType))
+			hoveredPw = NULL;
+
+		for (size_t i = 0; i < internal->multiPatchPorts.size(); i++) {
+			CableWidget* cw = internal->multiPatchPorts[i].cable.get();
+			if (!cw)
+				continue;
+			// Only the cable that will be patched by the next click snaps to the port
+			cw->getHoveredPort(internal->multiPatchFreeType) = (i == internal->multiPatchIndex) ? hoveredPw : NULL;
+		}
+	}
+
 	Widget::step();
 }
 
@@ -172,6 +218,33 @@ void RackWidget::draw(const DrawArgs& args) {
 	// Draw cables
 	Widget::drawLayer(args, 3);
 
+	// Draw multi-patch port highlights
+	if (internal->multiPatching) {
+		for (size_t i = 0; i < internal->multiPatchPorts.size(); i++) {
+			// Mark the end the cable is still attached to, which is where it hangs from
+			CableWidget* cw = internal->multiPatchPorts[i].cable.get();
+			PortWidget* pw = NULL;
+			if (cw)
+				pw = cw->inputPort ? cw->inputPort : cw->outputPort;
+			if (!pw)
+				pw = internal->multiPatchPorts[i].port.get();
+			if (!pw)
+				continue;
+			math::Vec pos = pw->getRelativeOffset(pw->box.size.div(2), this);
+			float radius = std::max(pw->box.size.x, pw->box.size.y) / 2 + 2.0;
+			// Highlight the port that will be patched by the next click
+			bool next = (i == internal->multiPatchIndex);
+			nvgBeginPath(args.vg);
+			nvgCircle(args.vg, VEC_ARGS(pos), radius);
+			nvgStrokeWidth(args.vg, next ? 2.5 : 1.5);
+			// Dim ports that are already patched
+			bool patched = (i < internal->multiPatchIndex);
+			float alpha = next ? 1.0 : patched ? 0.25 : 0.5;
+			nvgStrokeColor(args.vg, nvgRGBAf(1, 1, 1, alpha));
+			nvgStroke(args.vg);
+		}
+	}
+
 	// Draw selection rectangle
 	if (internal->selecting) {
 		nvgBeginPath(args.vg);
@@ -194,12 +267,26 @@ void RackWidget::onHover(const HoverEvent& e) {
 
 void RackWidget::onHoverKey(const HoverKeyEvent& e) {
 	OpaqueWidget::onHoverKey(e);
+	if (e.isConsumed())
+		return;
+
+	if (e.action == GLFW_PRESS && e.isKeyCommand(GLFW_KEY_ESCAPE, 0)) {
+		if (internal->multiPatching) {
+			endMultiPatch();
+			e.consume(this);
+		}
+	}
 }
 
 void RackWidget::onButton(const ButtonEvent& e) {
 	OpaqueWidget::onButton(e);
 	if (e.isConsumed())
 		return;
+
+	// Cancel multi-patching when clicking the empty rack, but handle the click as usual
+	if (e.action == GLFW_PRESS && internal->multiPatching) {
+		endMultiPatch();
+	}
 
 	if (e.button == GLFW_MOUSE_BUTTON_RIGHT) {
 		if (e.action == GLFW_PRESS) {
@@ -254,6 +341,12 @@ math::Vec RackWidget::getMousePos() {
 }
 
 void RackWidget::clear() {
+	// Abort multi-patching, discarding its history since its cables are about to be removed
+	if (internal->multiPatchHistory) {
+		delete internal->multiPatchHistory;
+		internal->multiPatchHistory = NULL;
+	}
+	endMultiPatch();
 	// This isn't required because removing all ModuleWidgets should remove all cables, but do it just in case.
 	clearCables();
 	// Remove ModuleWidgets
@@ -1492,7 +1585,7 @@ CableWidget* RackWidget::getIncompleteCable() {
 	for (auto it = internal->cableContainer->children.rbegin(); it != internal->cableContainer->children.rend(); it++) {
 		CableWidget* cw = dynamic_cast<CableWidget*>(*it);
 		assert(cw);
-		if (!cw->isComplete())
+		if (!cw->isComplete() && !isMultiPatchCable(cw))
 			return cw;
 	}
 	return NULL;
@@ -1504,6 +1597,9 @@ PlugWidget* RackWidget::getTopPlug(PortWidget* port) {
 		PlugWidget* plug = dynamic_cast<PlugWidget*>(*it);
 		assert(plug);
 		CableWidget* cw = plug->getCable();
+		// Multi-patch cables are never grabbed, so they are never on top
+		if (isMultiPatchCable(cw))
+			continue;
 		PortWidget* port2 = cw->getPort(plug->getType());
 		if (port2 == port)
 			return plug;
@@ -1570,7 +1666,7 @@ std::vector<CableWidget*> RackWidget::getIncompleteCables() {
 	for (widget::Widget* w : internal->cableContainer->children) {
 		CableWidget* cw = dynamic_cast<CableWidget*>(w);
 		assert(cw);
-		if (!cw->isComplete())
+		if (!cw->isComplete() && !isMultiPatchCable(cw))
 			cws.push_back(cw);
 	}
 	return cws;
@@ -1640,6 +1736,287 @@ ParamWidget* RackWidget::getTouchedParam() {
 
 void RackWidget::setTouchedParam(ParamWidget* pw) {
 	touchedParam = pw;
+}
+
+/** Creates a cable attached to the port on one end and following the cursor on the other. */
+static CableWidget* createMultiPatchCable(RackWidget* rack, PortWidget* pw) {
+	CableWidget* cw = new CableWidget;
+	cw->color = rack->getNextCableColor();
+	cw->getPort(pw->type) = pw;
+	rack->addCable(cw);
+	return cw;
+}
+
+/** Returns the port's top cable if it can be unplugged and carried by the cursor. */
+static CableWidget* getMultiPatchGrabCable(RackWidget* rack, PortWidget* pw) {
+	CableWidget* cw = rack->getTopCable(pw);
+	if (cw && !cw->isComplete())
+		cw = NULL;
+	return cw;
+}
+
+/** Collects a cable from the port, leaving its free end on the cursor.
+MULTI_PATCH_GRAB unplugs the port's top cable and MULTI_PATCH_CLONE duplicates it, both handing
+over the plug that was in this port. Otherwise a new cable is attached to the port, handing over a
+plug for the opposite type instead.
+*/
+static void collectMultiPatchCable(RackWidget* rack, RackWidget::Internal::MultiPatchPort& p, PortWidget* pw, RackWidget::MultiPatchMode mode) {
+	engine::Port::Type otherType = (pw->type == engine::Port::INPUT) ? engine::Port::OUTPUT : engine::Port::INPUT;
+	CableWidget* topCw = (mode != RackWidget::MULTI_PATCH_CREATE) ? getMultiPatchGrabCable(rack, pw) : NULL;
+	CableWidget* cw;
+
+	if (topCw && mode == RackWidget::MULTI_PATCH_GRAB) {
+		// Remember how to plug the cable back in if it is never patched
+		p.grabbedPort = pw;
+		p.grabHistory = new history::CableRemove;
+		p.grabHistory->setCable(topCw);
+		// Unplug this end, leaving the cable hanging from its other end
+		cw = topCw;
+		cw->getPort(pw->type) = NULL;
+		cw->updateCable();
+	}
+	else if (topCw) {
+		// Duplicate the cable, keeping the end this port isn't plugged into, and its color
+		cw = new CableWidget;
+		cw->color = topCw->color;
+		cw->getPort(otherType) = topCw->getPort(otherType);
+		rack->addCable(cw);
+	}
+	else {
+		cw = createMultiPatchCable(rack, pw);
+	}
+
+	p.port = pw;
+	p.cable = cw;
+}
+
+/** Plugs a grabbed cable back in where it came from, or removes a cable that was created.
+Leaves the entry holding no cable.
+*/
+static void releaseMultiPatchCable(RackWidget* rack, RackWidget::Internal::MultiPatchPort& p) {
+	CableWidget* cw = p.cable.get();
+	PortWidget* grabbedPort = p.grabbedPort.get();
+	p.cable.set(NULL);
+	p.grabbedPort.set(NULL);
+
+	// A grabbed cable is plugged back in, so its removal never reaches the history
+	if (p.grabHistory) {
+		delete p.grabHistory;
+		p.grabHistory = NULL;
+		if (cw && grabbedPort) {
+			cw->hoveredOutputPort = NULL;
+			cw->hoveredInputPort = NULL;
+			cw->getPort(grabbedPort->type) = grabbedPort;
+			cw->updateCable();
+			return;
+		}
+	}
+
+	if (cw) {
+		rack->removeCable(cw);
+		delete cw;
+	}
+}
+
+void RackWidget::endMultiPatch() {
+	// Reset the state before releasing the cables, so they are no longer multi-patch cables
+	std::vector<Internal::MultiPatchPort> ports;
+	ports.swap(internal->multiPatchPorts);
+	internal->multiPatching = false;
+	internal->multiPatchGrabMode = false;
+	internal->multiPatchIndex = 0;
+
+	// Plug back or remove the cables that are still following the cursor
+	for (Internal::MultiPatchPort& p : ports) {
+		releaseMultiPatchCable(this, p);
+	}
+
+	// Push history
+	history::ComplexAction* h = internal->multiPatchHistory;
+	internal->multiPatchHistory = NULL;
+	if (!h) {
+		// Not multi-patching, or the history was discarded
+	}
+	else if (h->isEmpty()) {
+		// No cables were patched, don't push anything
+		delete h;
+	}
+	else if (h->actions.size() == 1) {
+		// Push single history action
+		APP->history->push(h->actions[0]);
+		h->actions.clear();
+		delete h;
+	}
+	else {
+		// Push ComplexAction
+		APP->history->push(h);
+	}
+}
+
+bool RackWidget::isMultiPatching() {
+	return internal->multiPatching;
+}
+
+bool RackWidget::canMultiPatchPort(PortWidget* pw) {
+	if (!internal->multiPatching)
+		return false;
+	if (!pw || !pw->module)
+		return false;
+	// Cables can always be plugged into ports of their free end's type
+	if (pw->type == internal->multiPatchFreeType)
+		return true;
+	// A collection of unplugged cables only grows by unplugging more ports of the same type, so it
+	// is never a mix of unplugged inputs and unplugged outputs
+	if (internal->multiPatchGrabMode)
+		return false;
+	// A collection of new cables grows by starting cables on ports of the opposite type
+	return internal->multiPatchIndex == 0;
+}
+
+bool RackWidget::isMultiPatchCable(CableWidget* cw) {
+	if (!internal->multiPatching || !cw)
+		return false;
+	for (const Internal::MultiPatchPort& p : internal->multiPatchPorts) {
+		if (p.cable.get() == cw)
+			return true;
+	}
+	return false;
+}
+
+void RackWidget::multiPatchPort(PortWidget* pw) {
+	multiPatchPort(pw, MULTI_PATCH_GRAB);
+}
+
+void RackWidget::multiPatchCreateCable(PortWidget* pw) {
+	multiPatchPort(pw, MULTI_PATCH_CREATE);
+}
+
+void RackWidget::multiPatchCloneCable(PortWidget* pw) {
+	multiPatchPort(pw, MULTI_PATCH_CLONE);
+}
+
+void RackWidget::multiPatchPort(PortWidget* pw, MultiPatchMode mode) {
+	if (!pw || !pw->module)
+		return;
+
+	engine::Port::Type otherType = (pw->type == engine::Port::INPUT) ? engine::Port::OUTPUT : engine::Port::INPUT;
+	// Unplugging and duplicating both hand over the plug at this port, so the cable is patched into
+	// a port of this type. A new cable hands over a plug for the opposite type instead.
+	bool takesClickedEnd = (mode != MULTI_PATCH_CREATE) && getMultiPatchGrabCable(this, pw);
+	engine::Port::Type freeType = takesClickedEnd ? pw->type : otherType;
+
+	// Begin collecting cables
+	if (!internal->multiPatching) {
+		internal->multiPatchPorts.clear();
+		internal->multiPatchIndex = 0;
+
+		Internal::MultiPatchPort p;
+		collectMultiPatchCable(this, p, pw, mode);
+		internal->multiPatchPorts.push_back(p);
+
+		// The first click sets the side the collection's free ends are on, so later clicks on ports
+		// of the free type take more cables instead of patching
+		internal->multiPatching = true;
+		internal->multiPatchGrabMode = takesClickedEnd;
+		internal->multiPatchFreeType = freeType;
+
+		internal->multiPatchHistory = new history::ComplexAction;
+		internal->multiPatchHistory->name = string::translate("RackWidget.history.multiPatch");
+		return;
+	}
+
+	if (!canMultiPatchPort(pw))
+		return;
+
+	auto& ports = internal->multiPatchPorts;
+
+	if (internal->multiPatchIndex == 0) {
+		// Clicking a collected port again drops it from the collection
+		auto it = std::find_if(ports.begin(), ports.end(), [&](const Internal::MultiPatchPort& p) {
+			return p.port.get() == pw;
+		});
+		if (it != ports.end()) {
+			releaseMultiPatchCable(this, *it);
+			ports.erase(it);
+			if (ports.empty())
+				endMultiPatch();
+			return;
+		}
+
+		// Only collect a cable whose free end matches the collection, so every collected cable is
+		// patched into the same type of port
+		bool collect;
+		if (pw->type != internal->multiPatchFreeType) {
+			// Only a new cable started here leaves its free end on the other type
+			collect = true;
+			mode = MULTI_PATCH_CREATE;
+		}
+		else {
+			// Only taking this port's plug leaves the free end on this type
+			collect = internal->multiPatchGrabMode && takesClickedEnd;
+		}
+
+		if (collect) {
+			Internal::MultiPatchPort p;
+			collectMultiPatchCable(this, p, pw, mode);
+			ports.push_back(p);
+			return;
+		}
+	}
+
+	// Patching phase: skip collected cables that have been deleted
+	while (internal->multiPatchIndex < ports.size() && !ports[internal->multiPatchIndex].cable.get()) {
+		releaseMultiPatchCable(this, ports[internal->multiPatchIndex]);
+		internal->multiPatchIndex++;
+	}
+	if (internal->multiPatchIndex >= ports.size()) {
+		endMultiPatch();
+		return;
+	}
+
+	Internal::MultiPatchPort& p = ports[internal->multiPatchIndex];
+	CableWidget* cw = p.cable.get();
+	engine::Port::Type anchorType = (internal->multiPatchFreeType == engine::Port::INPUT) ? engine::Port::OUTPUT : engine::Port::INPUT;
+	PortWidget* anchorPw = cw->getPort(anchorType);
+	PortWidget* outputPort = (internal->multiPatchFreeType == engine::Port::OUTPUT) ? pw : anchorPw;
+	PortWidget* inputPort = (internal->multiPatchFreeType == engine::Port::OUTPUT) ? anchorPw : pw;
+	internal->multiPatchIndex++;
+
+	// Plugging a grabbed cable back where it came from, or where a similar cable already exists,
+	// changes nothing, so just put the cable back
+	if (!anchorPw || pw == p.grabbedPort.get() || getCable(outputPort, inputPort)) {
+		releaseMultiPatchCable(this, p);
+	}
+	else {
+		// Clear the hovered ports, which would otherwise dangle if the cable is grabbed again later
+		cw->hoveredOutputPort = NULL;
+		cw->hoveredInputPort = NULL;
+		cw->getPort(internal->multiPatchFreeType) = pw;
+		cw->updateCable();
+
+		// A grabbed cable was unplugged from its old port before being plugged into this one
+		if (p.grabHistory) {
+			if (internal->multiPatchHistory)
+				internal->multiPatchHistory->push(p.grabHistory);
+			else
+				delete p.grabHistory;
+			p.grabHistory = NULL;
+		}
+		p.grabbedPort.set(NULL);
+		p.cable.set(NULL);
+
+		// history::CableAdd
+		history::CableAdd* h = new history::CableAdd;
+		h->setCable(cw);
+		if (internal->multiPatchHistory)
+			internal->multiPatchHistory->push(h);
+		else
+			delete h;
+	}
+
+	// Stop when every collected cable has been patched
+	if (internal->multiPatchIndex >= ports.size())
+		endMultiPatch();
 }
 
 

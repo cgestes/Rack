@@ -61,6 +61,7 @@ std::string lastPatchDirectory;
 std::string lastSelectionDirectory;
 std::list<std::string> recentPatchPaths;
 bool cableAutoRotate = true;
+bool multiPatch = false;
 std::vector<NVGcolor> cableColors;
 std::vector<std::string> cableLabels;
 bool autoCheckUpdates = true;
@@ -222,6 +223,8 @@ json_t* toJson() {
 	json_object_set_new(rootJ, "cableLabels", cableLabelsJ);
 
 	json_object_set_new(rootJ, "cableAutoRotate", json_boolean(cableAutoRotate));
+
+	json_object_set_new(rootJ, "multiPatch", json_boolean(multiPatch));
 
 	json_object_set_new(rootJ, "autoCheckUpdates", json_boolean(autoCheckUpdates));
 
@@ -492,6 +495,10 @@ void fromJson(json_t* rootJ) {
 	json_t* cableAutoRotateJ = json_object_get(rootJ, "cableAutoRotate");
 	if (cableAutoRotateJ)
 		cableAutoRotate = json_boolean_value(cableAutoRotateJ);
+
+	json_t* multiPatchJ = json_object_get(rootJ, "multiPatch");
+	if (multiPatchJ)
+		multiPatch = json_boolean_value(multiPatchJ);
 
 	json_t* autoCheckUpdatesJ = json_object_get(rootJ, "autoCheckUpdates");
 	if (autoCheckUpdatesJ)

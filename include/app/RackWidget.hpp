@@ -147,6 +147,47 @@ struct RackWidget : widget::OpaqueWidget {
 	ParamWidget* getTouchedParam();
 	void setTouchedParam(ParamWidget* pw);
 
+	// Multi-patch methods
+
+	/** Handles a click on a port while `settings::multiPatch` is enabled.
+	Collects a cable whose free end follows the cursor, or patches the next collected cable into
+	this port. A port with a cable is unplugged, so the cable is moved rather than copied; an empty
+	port gets a new cable. Cables that are never patched are plugged back in where they came from.
+	Collecting continues while a click yields a cable with the same free end as the collection, so
+	unplugged cables are patched into ports of the clicked port's type, and new cables into ports of
+	the opposite type. The first click that can't collect starts patching.
+	*/
+	void multiPatchPort(PortWidget* pw);
+	/** Like multiPatchPort(), but always collects a new cable, leaving the cables already on the
+	port plugged in. The click equivalent of Ctrl+drag.
+	*/
+	void multiPatchCreateCable(PortWidget* pw);
+	/** Like multiPatchPort(), but duplicates the port's top cable instead of unplugging it: the
+	duplicate keeps the cable's other end and color, and its plug for this port follows the cursor.
+	The click equivalent of Ctrl+shift+drag.
+	*/
+	void multiPatchCloneCable(PortWidget* pw);
+	/** How a multi-patch click takes a cable from a port. */
+	enum MultiPatchMode {
+		/** Unplug the port's top cable, or start a new cable if the port has none. */
+		MULTI_PATCH_GRAB,
+		/** Always start a new cable on the port. */
+		MULTI_PATCH_CREATE,
+		/** Duplicate the port's top cable, or start a new cable if the port has none. */
+		MULTI_PATCH_CLONE,
+	};
+	PRIVATE void multiPatchPort(PortWidget* pw, MultiPatchMode mode);
+	/** Stops multi-patching and pushes the created cables to the history. */
+	void endMultiPatch();
+	bool isMultiPatching();
+	/** Returns whether clicking the port would collect it or patch a cable to it. */
+	bool canMultiPatchPort(PortWidget* pw);
+	/** Returns whether the cable is a collected multi-patch cable following the cursor.
+	These cables are not returned by getIncompleteCables() or getTopPlug(), so they are never grabbed
+	or completed by the usual cable dragging.
+	*/
+	bool isMultiPatchCable(CableWidget* cw);
+
 	PRIVATE void updateExpanders();
 };
 

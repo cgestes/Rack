@@ -596,6 +596,8 @@ struct ViewButton : MenuButton {
 			}, false, true));
 		}));
 
+		menu->addChild(createBoolPtrMenuItem(string::translate("MenuBar.view.multiPatch"), "", &settings::multiPatch));
+
 		menu->addChild(new ui::MenuSeparator);
 		menu->addChild(createMenuLabel(string::translate("MenuBar.view.parameters")));
 

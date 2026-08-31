@@ -89,6 +89,8 @@ extern std::list<std::string> recentPatchPaths;
 extern std::vector<NVGcolor> cableColors;
 extern std::vector<std::string> cableLabels;
 extern bool cableAutoRotate;
+/** Clicking a port collects it for patching multiple cables at once. */
+extern bool multiPatch;
 extern bool autoCheckUpdates;
 extern bool verifyHttpsCerts;
 extern bool showTipsOnLaunch;

@@ -24,16 +24,48 @@ struct PortWidget::Internal {
 	engine::Port::Type draggedType = engine::Port::INPUT;
 	/** Created when dragging starts, deleted when it ends. */
 	history::ComplexAction* history = NULL;
+	/** Mouse position when dragging started, for telling clicks from drags. */
+	math::Vec dragStartPos;
+	/** Furthest the mouse has strayed from dragStartPos during the current drag.
+	Sampled every frame in step(), so a drag that wanders and returns is still a drag.
+	*/
+	float dragMaxDistance = 0.f;
+	/** What the current drag should do if it turns out to be a click. Set from the key modifiers,
+	mirroring the drag gestures: no modifier grabs the top cable, Ctrl creates a cable, and
+	Ctrl+shift creates one with the top cable's color.
+	*/
+	enum ClickAction {
+		CLICK_NONE,
+		CLICK_COLLECT,
+		CLICK_CREATE,
+		CLICK_CLONE,
+	};
+	ClickAction dragClickAction = CLICK_NONE;
+	/** Next cable color before dragging started, restored if the drag turns out to be a click. */
+	int dragCableColorId = 0;
 };
 
 
+/** Maximum mouse distance of a drag that is still considered a click. */
+static const float CLICK_DISTANCE = 6.f;
+
+
 struct PortTooltip : ui::Tooltip {
-	PortWidget* portWidget;
+	/** Weak so that a tooltip outliving its PortWidget can't dereference it. */
+	WeakPtr<PortWidget> portWidget;
 
 	void step() override {
-		if (portWidget->module) {
-			engine::Port* port = portWidget->getPort();
-			engine::PortInfo* portInfo = portWidget->getPortInfo();
+		PortWidget* pw = portWidget.get();
+		if (!pw) {
+			// The PortWidget was destroyed without destroying its tooltip
+			hide();
+			return;
+		}
+
+		engine::Port* port = pw->getPort();
+		engine::PortInfo* portInfo = pw->getPortInfo();
+		// A module may have fewer PortInfos than PortWidgets, so don't assume it exists
+		if (port && portInfo) {
 			// Label
 			text = portInfo->getFullName();
 			// Description
@@ -53,27 +85,30 @@ struct PortTooltip : ui::Tooltip {
 				text += string::f("% .3fV", math::normalizeZero(v));
 			}
 			// From/To
-			std::vector<CableWidget*> cables = APP->scene->rack->getCompleteCablesOnPort(portWidget);
+			std::vector<CableWidget*> cables = APP->scene->rack->getCompleteCablesOnPort(pw);
 			for (auto it = cables.rbegin(); it != cables.rend(); it++) {
 				CableWidget* cable = *it;
-				PortWidget* otherPw = (portWidget->type == engine::Port::INPUT) ? cable->outputPort : cable->inputPort;
+				PortWidget* otherPw = (pw->type == engine::Port::INPUT) ? cable->outputPort : cable->inputPort;
 				if (!otherPw)
 					continue;
+				engine::PortInfo* otherPortInfo = otherPw->getPortInfo();
+				if (!otherPortInfo)
+					continue;
 				text += "\n";
-				if (portWidget->type == engine::Port::INPUT)
+				if (pw->type == engine::Port::INPUT)
 					text += string::translate("PortWidget.from");
 				else
 					text += string::translate("PortWidget.to");
 				text += otherPw->module->model->getFullName();
 				text += ": ";
-				text += otherPw->getPortInfo()->getName();
+				text += otherPortInfo->getName();
 				text += " ";
 				text += (otherPw->type == engine::Port::INPUT) ? string::translate("PortWidget.input") : string::translate("PortWidget.output");
 			}
 		}
 		Tooltip::step();
 		// Position at bottom-right of parameter
-		box.pos = portWidget->getAbsoluteOffset(portWidget->box.size).round();
+		box.pos = pw->getAbsoluteOffset(pw->box.size).round();
 		// Fit inside parent (copied from Tooltip.cpp)
 		assert(parent);
 		box = box.nudge(parent->box.zeroPos());
@@ -286,6 +321,9 @@ void PortWidget::createContextMenu() {
 	std::vector<CableWidget*> cws = APP->scene->rack->getCompleteCablesOnPort(this);
 	CableWidget* topCw = cws.empty() ? NULL : cws.back();
 
+	// When multi-patching is enabled, these gestures also work with a click
+	std::string dragOrClick = string::translate(settings::multiPatch ? "key.click" : "key.drag");
+
 	menu->addChild(createMenuItem(string::translate("PortWidget.deleteTopCable"), widget::getKeyCommandName(0, RACK_MOD_SHIFT) + string::translate("key.click"),
 		[=]() {
 			if (!weakThis)
@@ -296,7 +334,7 @@ void PortWidget::createContextMenu() {
 	));
 
 	{
-		PortCloneCableItem* item = createMenuItem<PortCloneCableItem>(string::translate("PortWidget.cloneTopCable"), widget::getKeyCommandName(0, RACK_MOD_CTRL | RACK_MOD_SHIFT) + string::translate("key.drag"));
+		PortCloneCableItem* item = createMenuItem<PortCloneCableItem>(string::translate("PortWidget.cloneTopCable"), widget::getKeyCommandName(0, RACK_MOD_CTRL | RACK_MOD_SHIFT) + dragOrClick);
 		item->disabled = !topCw;
 		item->pw = this;
 		item->cw = topCw;
@@ -304,7 +342,7 @@ void PortWidget::createContextMenu() {
 	}
 
 	{
-		PortCreateCableItem* item = createMenuItem<PortCreateCableItem>(string::translate("PortWidget.createCableTop"), widget::getKeyCommandName(0, RACK_MOD_CTRL) + string::translate("key.drag"));
+		PortCreateCableItem* item = createMenuItem<PortCreateCableItem>(string::translate("PortWidget.createCableTop"), widget::getKeyCommandName(0, RACK_MOD_CTRL) + dragOrClick);
 		item->pw = this;
 		menu->addChild(item);
 	}
@@ -369,6 +407,13 @@ void PortWidget::deleteTopCableAction() {
 
 
 void PortWidget::step() {
+	// Track how far the mouse strays while dragging this port, to tell clicks from drags
+	if (APP->event->getDraggedWidget() == this && APP->event->dragButton == GLFW_MOUSE_BUTTON_LEFT) {
+		float distance = APP->scene->rack->getMousePos().minus(internal->dragStartPos).norm();
+		if (distance > internal->dragMaxDistance)
+			internal->dragMaxDistance = distance;
+	}
+
 	Widget::step();
 }
 
@@ -381,6 +426,10 @@ void PortWidget::draw(const DrawArgs& args) {
 			// Dim the PortWidget if the active cable cannot plug into this PortWidget
 			nvgTint(args.vg, nvgRGBf(0.33, 0.33, 0.33));
 		}
+	}
+	else if (module && APP->scene->rack->isMultiPatching() && !APP->scene->rack->canMultiPatchPort(this)) {
+		// Dim the PortWidget if multi-patching cannot patch into it
+		nvgTint(args.vg, nvgRGBf(0.33, 0.33, 0.33));
 	}
 	Widget::draw(args);
 }
@@ -417,6 +466,22 @@ void PortWidget::onLeave(const LeaveEvent& e) {
 void PortWidget::onDragStart(const DragStartEvent& e) {
 	if (e.button != GLFW_MOUSE_BUTTON_LEFT)
 		return;
+
+	// Remember what a click on this port would do, for multi-patching in onDragEnd()
+	internal->dragStartPos = APP->scene->rack->getMousePos();
+	internal->dragMaxDistance = 0.f;
+	internal->dragCableColorId = APP->scene->rack->getNextCableColorId();
+	internal->dragClickAction = Internal::CLICK_NONE;
+	// Drags started from the context menu are always drags, never clicks
+	if (internal->overrideCws.empty() && !internal->overrideCloneCw && !internal->overrideCreateCable) {
+		int clickMods = APP->window->getMods() & RACK_MOD_MASK;
+		if (clickMods == 0)
+			internal->dragClickAction = Internal::CLICK_COLLECT;
+		else if (clickMods == RACK_MOD_CTRL)
+			internal->dragClickAction = Internal::CLICK_CREATE;
+		else if (clickMods == (RACK_MOD_CTRL | RACK_MOD_SHIFT))
+			internal->dragClickAction = Internal::CLICK_CLONE;
+	}
 
 	DEFER({
 		// Reset overrides
@@ -510,6 +575,14 @@ void PortWidget::onDragEnd(const DragEndEvent& e) {
 		delete cw;
 	}
 
+	// Check whether this drag was really a click on this port: the mouse never strayed from the
+	// port, and no cable was added, removed, or moved. onDragDrop() has already run, so the history
+	// is final. A drag that patched or unpatched a cable is never a click, however short it was,
+	// and neither is one that dragged a cable away and dropped it back where it came from.
+	bool click = internal->dragClickAction != Internal::CLICK_NONE
+		&& (!internal->history || internal->history->isEmpty())
+		&& internal->dragMaxDistance <= CLICK_DISTANCE;
+
 	// Push history
 	if (!internal->history) {
 		// This shouldn't happen since it's created in onDragStart()
@@ -529,6 +602,18 @@ void PortWidget::onDragEnd(const DragEndEvent& e) {
 		APP->history->push(internal->history);
 	}
 	internal->history = NULL;
+
+	// Handle the click on this port, which left cables unchanged
+	if (settings::multiPatch && click) {
+		// Undo the color rotation of the cable that was created and removed by the click
+		APP->scene->rack->setNextCableColorId(internal->dragCableColorId);
+		if (internal->dragClickAction == Internal::CLICK_CLONE)
+			APP->scene->rack->multiPatchCloneCable(this);
+		else if (internal->dragClickAction == Internal::CLICK_CREATE)
+			APP->scene->rack->multiPatchCreateCable(this);
+		else
+			APP->scene->rack->multiPatchPort(this);
+	}
 }
 
 
