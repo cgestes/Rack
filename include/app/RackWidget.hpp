@@ -192,6 +192,23 @@ struct RackWidget : widget::OpaqueWidget {
 		/** Patch the next collected cable into the port. */
 		MULTI_PATCH_ACTION_PATCH,
 	};
+	/** The state a port is in while multi-patching, from which its click action is decided. */
+	struct MultiPatchState {
+		/** Whether any cables are collected yet. */
+		bool collecting = false;
+		/** Whether a cable has been patched, so the collection can no longer grow. */
+		bool patching = false;
+		/** Whether the port's type is that of the collected cables' free ends. */
+		bool freeType = false;
+		/** Whether a cable was already collected from this port. */
+		bool collected = false;
+		/** Whether the port still has a cable the collection hasn't taken. */
+		bool canTake = false;
+	};
+	/** Decides what clicking a port does from the state it is in.
+	Pure, so the rules can be tested without a rack.
+	*/
+	static MultiPatchAction getMultiPatchAction(const MultiPatchState& state, MultiPatchMode mode);
 	/** Returns what clicking the port would do with the modifier keys currently held. */
 	MultiPatchAction getMultiPatchAction(PortWidget* pw);
 	PRIVATE MultiPatchAction getMultiPatchAction(PortWidget* pw, MultiPatchMode mode);

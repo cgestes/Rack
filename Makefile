@@ -114,6 +114,10 @@ dep:
 cleandep:
 	$(MAKE) -C dep clean
 
+test: $(TARGET)
+	$(CXX) $(CXXFLAGS) -o build/multiPatchTest test/multiPatchTest.cpp $(TARGET) $(STANDALONE_LDFLAGS)
+	./build/multiPatchTest
+
 run: $(STANDALONE_TARGET)
 	./$< -d
 
@@ -320,4 +324,4 @@ cleandist:
 
 
 .DEFAULT_GOAL := all
-.PHONY: all dep run debug clean plugins dist sdk package lipo notarize
+.PHONY: all dep test run debug clean plugins dist sdk package lipo notarize

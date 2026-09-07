@@ -1882,9 +1882,10 @@ void RackWidget::setTouchedParam(ParamWidget* pw) {
 }
 
 /** Creates a cable attached to the port on one end and following the cursor on the other. */
-static CableWidget* createMultiPatchCable(RackWidget* rack, PortWidget* pw) {
+static CableWidget* createMultiPatchCable(RackWidget* rack, PortWidget* pw, const NVGcolor* color) {
 	CableWidget* cw = new CableWidget;
-	cw->color = rack->getNextCableColor();
+	// A cable copied from one already on the port keeps its color, a new one takes the next color
+	cw->color = color ? *color : rack->getNextCableColor();
 	cw->getPort(pw->type) = pw;
 	rack->addCable(cw);
 	return cw;
@@ -1920,11 +1921,11 @@ static CableWidget* getMultiPatchTakeCable(RackWidget* rack, RackWidget::Interna
 }
 
 /** Collects a cable from the port, leaving its free end on the cursor.
-MULTI_PATCH_GRAB unplugs the port's top cable and MULTI_PATCH_CLONE duplicates it, both handing
-over the plug that was in this port. Otherwise a new cable is attached to the port, handing over a
-plug for the opposite type instead.
+MULTI_PATCH_GRAB unplugs the port's top cable. MULTI_PATCH_CLONE duplicates it, keeping whichever
+of its ends leaves the free end on `freeType`, so a cable can be duplicated from either of the
+ports it is plugged into. Otherwise a new cable is attached to the port.
 */
-static void collectMultiPatchCable(RackWidget* rack, RackWidget::Internal* internal, RackWidget::Internal::MultiPatchPort& p, PortWidget* pw, RackWidget::MultiPatchMode mode) {
+static void collectMultiPatchCable(RackWidget* rack, RackWidget::Internal* internal, RackWidget::Internal::MultiPatchPort& p, PortWidget* pw, RackWidget::MultiPatchMode mode, engine::Port::Type freeType) {
 	engine::Port::Type otherType = (pw->type == engine::Port::INPUT) ? engine::Port::OUTPUT : engine::Port::INPUT;
 	CableWidget* topCw = (mode != RackWidget::MULTI_PATCH_CREATE) ? getMultiPatchTakeCable(rack, internal, pw) : NULL;
 	CableWidget* cw;
@@ -1939,15 +1940,16 @@ static void collectMultiPatchCable(RackWidget* rack, RackWidget::Internal* inter
 		cw->getPort(pw->type) = NULL;
 		cw->updateCable();
 	}
-	else if (topCw) {
-		// Duplicate the cable, keeping the end this port isn't plugged into, and its color
+	else if (topCw && freeType == pw->type) {
+		// Duplicate the cable by its far end, handing over the plug that is in this port
 		cw = new CableWidget;
 		cw->color = topCw->color;
 		cw->getPort(otherType) = topCw->getPort(otherType);
 		rack->addCable(cw);
 	}
 	else {
-		cw = createMultiPatchCable(rack, pw);
+		// A cable starting here, wearing the color of the one it was copied from
+		cw = createMultiPatchCable(rack, pw, topCw ? &topCw->color : NULL);
 	}
 
 	p.port = pw;
@@ -2042,46 +2044,61 @@ RackWidget::MultiPatchAction RackWidget::getMultiPatchAction(PortWidget* pw) {
 	return getMultiPatchAction(pw, internal->multiPatchHoverMode);
 }
 
-RackWidget::MultiPatchAction RackWidget::getMultiPatchAction(PortWidget* pw, MultiPatchMode mode) {
-	if (!internal->multiPatching) {
-		// Nothing is collected yet, so report what the click would start the collection with
-		if (!settings::multiPatch || !pw || !pw->module)
-			return MULTI_PATCH_ACTION_NONE;
-		if (mode != MULTI_PATCH_CREATE && getMultiPatchTakeCable(this, internal, pw))
+RackWidget::MultiPatchAction RackWidget::getMultiPatchAction(const MultiPatchState& state, MultiPatchMode mode) {
+	if (!state.collecting) {
+		// Nothing is collected yet, so report what the click would start the collection with.
+		// Taking the port's cable hands over the plug that is in it, so the collection is patched
+		// into ports of this type; a new cable hands over a plug for the opposite type instead.
+		if (mode != MULTI_PATCH_CREATE && state.canTake)
 			return (mode == MULTI_PATCH_CLONE) ? MULTI_PATCH_ACTION_CLONE : MULTI_PATCH_ACTION_GRAB;
 		return MULTI_PATCH_ACTION_CREATE;
 	}
 
-	if (!canMultiPatchPort(pw))
-		return MULTI_PATCH_ACTION_NONE;
+	// Once a cable has been patched the collection can only shrink, and only into ports its cables
+	// can reach
+	if (state.patching)
+		return state.freeType ? MULTI_PATCH_ACTION_PATCH : MULTI_PATCH_ACTION_NONE;
 
-	if (internal->multiPatchIndex == 0) {
-		bool collected = false;
-		for (const Internal::MultiPatchPort& p : internal->multiPatchPorts) {
-			if (p.port.get() == pw) {
-				collected = true;
-				break;
-			}
-		}
-
-		// Only a cable whose free end matches the collection can be collected, so a port of the
-		// other type collects by starting a new cable, and a port of the free type by taking the
-		// plug that is in it
-		if (pw->type != internal->multiPatchFreeType) {
-			// A plain click puts back a cable already started here, Ctrl keeps multing the port
-			if (collected && mode == MULTI_PATCH_GRAB)
-				return MULTI_PATCH_ACTION_DROP;
-			return MULTI_PATCH_ACTION_CREATE;
-		}
-
-		// A plain click patches here, so a cable can be wired to a port whatever is already plugged
-		// into it. Ctrl and Ctrl+shift take another cable off the port instead, one click at a
-		// time, reaching the ones stacked underneath.
-		if (mode != MULTI_PATCH_GRAB && getMultiPatchTakeCable(this, internal, pw))
-			return (mode == MULTI_PATCH_CLONE) ? MULTI_PATCH_ACTION_CLONE : MULTI_PATCH_ACTION_GRAB;
+	// Only a cable whose free end matches the collection can be collected, so a port of the other
+	// type collects by starting a new cable, and a port of the free type by taking the plug that is
+	// in it
+	if (!state.freeType) {
+		// A plain click puts back a cable already started here, Ctrl keeps multing the port
+		if (state.collected && mode == MULTI_PATCH_GRAB)
+			return MULTI_PATCH_ACTION_DROP;
+		// Ctrl+shift starts the new cable as a copy of one already on the port, so a duplicate can
+		// be taken from either of its ends
+		if (mode == MULTI_PATCH_CLONE && state.canTake)
+			return MULTI_PATCH_ACTION_CLONE;
+		return MULTI_PATCH_ACTION_CREATE;
 	}
 
+	// A plain click patches here, so a cable can be wired to a port whatever is already plugged
+	// into it. Ctrl and Ctrl+shift take another cable off the port instead, one click at a time,
+	// reaching the ones stacked underneath.
+	if (mode != MULTI_PATCH_GRAB && state.canTake)
+		return (mode == MULTI_PATCH_CLONE) ? MULTI_PATCH_ACTION_CLONE : MULTI_PATCH_ACTION_GRAB;
+
 	return MULTI_PATCH_ACTION_PATCH;
+}
+
+RackWidget::MultiPatchAction RackWidget::getMultiPatchAction(PortWidget* pw, MultiPatchMode mode) {
+	if (!settings::multiPatch || !pw || !pw->module)
+		return MULTI_PATCH_ACTION_NONE;
+
+	MultiPatchState state;
+	state.collecting = internal->multiPatching;
+	state.patching = (internal->multiPatchIndex > 0);
+	state.freeType = (pw->type == internal->multiPatchFreeType);
+	state.canTake = (getMultiPatchTakeCable(this, internal, pw) != NULL);
+	for (const Internal::MultiPatchPort& p : internal->multiPatchPorts) {
+		if (p.port.get() == pw) {
+			state.collected = true;
+			break;
+		}
+	}
+
+	return getMultiPatchAction(state, mode);
 }
 
 NVGcolor RackWidget::getMultiPatchColor() {
@@ -2126,6 +2143,11 @@ void RackWidget::multiPatchPort(PortWidget* pw, MultiPatchMode mode) {
 	// The action says how to take the cable, whatever the modifiers were
 	MultiPatchMode collectMode = (action == MULTI_PATCH_ACTION_GRAB) ? MULTI_PATCH_GRAB
 		: (action == MULTI_PATCH_ACTION_CLONE) ? MULTI_PATCH_CLONE : MULTI_PATCH_CREATE;
+	// A cable taken by the plug in this port is patched into ports of this type, a new one into
+	// ports of the opposite type
+	engine::Port::Type otherType = (pw->type == engine::Port::INPUT) ? engine::Port::OUTPUT : engine::Port::INPUT;
+	engine::Port::Type freeType = internal->multiPatching ? internal->multiPatchFreeType
+		: ((action == MULTI_PATCH_ACTION_CREATE) ? otherType : pw->type);
 
 	// Begin collecting cables
 	if (!internal->multiPatching) {
@@ -2133,15 +2155,11 @@ void RackWidget::multiPatchPort(PortWidget* pw, MultiPatchMode mode) {
 		internal->multiPatchIndex = 0;
 
 		Internal::MultiPatchPort p;
-		collectMultiPatchCable(this, internal, p, pw, collectMode);
+		collectMultiPatchCable(this, internal, p, pw, collectMode, freeType);
 		internal->multiPatchPorts.push_back(p);
 
-		// Unplugging and duplicating hand over the plug at this port, so the cable is patched into
-		// a port of this type. A new cable hands over a plug for the opposite type instead.
 		internal->multiPatching = true;
-		internal->multiPatchFreeType = (action == MULTI_PATCH_ACTION_CREATE)
-			? ((pw->type == engine::Port::INPUT) ? engine::Port::OUTPUT : engine::Port::INPUT)
-			: pw->type;
+		internal->multiPatchFreeType = freeType;
 
 		internal->multiPatchHistory = new history::ComplexAction;
 		internal->multiPatchHistory->name = string::translate("RackWidget.history.multiPatch");
@@ -2166,7 +2184,7 @@ void RackWidget::multiPatchPort(PortWidget* pw, MultiPatchMode mode) {
 
 	if (action != MULTI_PATCH_ACTION_PATCH) {
 		Internal::MultiPatchPort p;
-		collectMultiPatchCable(this, internal, p, pw, collectMode);
+		collectMultiPatchCable(this, internal, p, pw, collectMode, freeType);
 		ports.push_back(p);
 		return;
 	}
