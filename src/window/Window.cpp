@@ -106,8 +106,6 @@ struct Window::Internal {
 	bool cursorLocked = false;
 	double cursorLockedPosX = 0.0;
 	double cursorLockedPosY = 0.0;
-	std::map<int, GLFWcursor*> cursorCache;
-	int cursorShape = GLFW_ARROW_CURSOR;
 
 	std::map<std::string, std::shared_ptr<Font>> fontCache;
 	std::map<std::string, std::shared_ptr<Image>> imageCache;
@@ -385,12 +383,6 @@ Window::~Window() {
 	// Fonts and Images in the cache must be deleted before the NanoVG context is deleted
 	internal->fontCache.clear();
 	internal->imageCache.clear();
-
-	for (const auto& pair : internal->cursorCache) {
-		if (pair.second)
-			glfwDestroyCursor(pair.second);
-	}
-	internal->cursorCache.clear();
 
 	// nvgDeleteClone(fbVg);
 
@@ -680,21 +672,6 @@ void Window::cursorUnlock() {
 	glfwSetInputMode(win, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
 }
 
-
-void Window::setCursor(int shape) {
-	if (shape == internal->cursorShape)
-		return;
-	internal->cursorShape = shape;
-
-	// Create the cursor on first use. A NULL entry means the shape isn't available on this system,
-	// which glfwSetCursor() interprets as the arrow cursor.
-	auto it = internal->cursorCache.find(shape);
-	if (it == internal->cursorCache.end()) {
-		GLFWcursor* cursor = (shape == GLFW_ARROW_CURSOR) ? NULL : glfwCreateStandardCursor(shape);
-		it = internal->cursorCache.insert({shape, cursor}).first;
-	}
-	glfwSetCursor(win, it->second);
-}
 
 bool Window::isCursorLocked() {
 	return internal->cursorLocked;

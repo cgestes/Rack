@@ -181,8 +181,14 @@ struct RackWidget : widget::OpaqueWidget {
 	enum MultiPatchAction {
 		/** Nothing, because the port would not accept the click. */
 		MULTI_PATCH_ACTION_NONE,
-		/** Collect a cable from the port, or drop it from the collection if already collected. */
-		MULTI_PATCH_ACTION_COLLECT,
+		/** Unplug the port's cable and collect it. */
+		MULTI_PATCH_ACTION_GRAB,
+		/** Collect a new cable started on the port. */
+		MULTI_PATCH_ACTION_CREATE,
+		/** Collect a duplicate of the port's cable. */
+		MULTI_PATCH_ACTION_CLONE,
+		/** Drop the port's collected cable from the collection. */
+		MULTI_PATCH_ACTION_DROP,
 		/** Patch the next collected cable into the port. */
 		MULTI_PATCH_ACTION_PATCH,
 	};

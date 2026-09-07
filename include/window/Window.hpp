@@ -84,10 +84,6 @@ struct Window {
 	void cursorLock();
 	void cursorUnlock();
 	bool isCursorLocked();
-	/** Sets the mouse cursor to a GLFW standard cursor shape, e.g. GLFW_ARROW_CURSOR.
-	Cursors are created on first use and cached. Setting the shape it already has does nothing.
-	*/
-	void setCursor(int shape);
 	/** Gets the current keyboard mod state
 	Don't call this from a Key event. Simply use `e.mods` instead.
 	*/
