@@ -18,7 +18,6 @@
 #include <patch.hpp>
 #include <helpers.hpp>
 #include <window/Window.hpp>
-#include <ui/Tooltip.hpp>
 
 
 namespace rack {
@@ -90,18 +89,6 @@ static void drawMultiPatchBadge(NVGcontext* vg, math::Vec pos, RackWidget::Multi
 }
 
 
-/** Follows the cursor while multi-patching, naming what a click would do. */
-struct MultiPatchHint : ui::Tooltip {
-	void step() override {
-		ui::Tooltip::step();
-		// Sit above the cursor, leaving the space below it for the hovered port's tooltip
-		box.pos = APP->scene->mousePos.plus(math::Vec(15, -box.size.y - 32));
-		assert(parent);
-		box = box.nudge(parent->box.zeroPos());
-	}
-};
-
-
 struct RackWidget::Internal {
 	RailWidget* rail = NULL;
 	widget::Widget* moduleContainer = NULL;
@@ -144,15 +131,15 @@ struct RackWidget::Internal {
 	history::ComplexAction* multiPatchHistory = NULL;
 	/** Mode the modifier keys currently held would give a click, for previewing it. */
 	MultiPatchMode multiPatchHoverMode = MULTI_PATCH_GRAB;
-	/** Owned. Exists only while multi-patching. */
-	MultiPatchHint* multiPatchHint = NULL;
 	/** Port under the cursor and what clicking it would do, drawn as a badge beside it. */
 	WeakPtr<PortWidget> multiPatchHoveredPort;
 	MultiPatchAction multiPatchHoveredAction = MULTI_PATCH_ACTION_NONE;
+	/** Cable that click would take, marked at the end that would stay plugged in. */
+	WeakPtr<CableWidget> multiPatchHoveredCable;
 };
 
 
-static std::string getMultiPatchHintText(RackWidget* rack, RackWidget::Internal* internal, PortWidget* hoveredPw);
+static CableWidget* getMultiPatchGrabCable(RackWidget* rack, PortWidget* pw);
 
 
 /** Creates a new Module and ModuleWidget */
@@ -253,9 +240,12 @@ void RackWidget::step() {
 	if (internal->multiPatching && !settings::multiPatch)
 		endMultiPatch();
 
-	// Snap the next multi-patch cable to the hovered port, like a dragged cable
-	if (internal->multiPatching) {
-		// Track what the held modifiers would make a click do, so ports can preview it
+	// Preview what clicking the hovered port would do, collecting or not
+	internal->multiPatchHoveredPort.set(NULL);
+	internal->multiPatchHoveredCable.set(NULL);
+	internal->multiPatchHoveredAction = MULTI_PATCH_ACTION_NONE;
+	if (settings::multiPatch) {
+		// Track what the held modifiers would make a click do
 		int mods = APP->window->getMods() & RACK_MOD_MASK;
 		if (mods == RACK_MOD_CTRL)
 			internal->multiPatchHoverMode = MULTI_PATCH_CREATE;
@@ -266,15 +256,23 @@ void RackWidget::step() {
 
 		widget::Widget* hoveredWidget = APP->event->getDraggedWidget() ? APP->event->getDragHoveredWidget() : APP->event->getHoveredWidget();
 		PortWidget* hoveredPw = dynamic_cast<PortWidget*>(hoveredWidget);
+		// A drag isn't a click, so don't preview one. Multi-patch clicks are brief drags of their
+		// own, so keep previewing while collecting.
+		if (hoveredPw && !internal->multiPatching && APP->event->getDraggedWidget())
+			hoveredPw = NULL;
 
-		// Say what a click would do, at the cursor
-		if (!internal->multiPatchHint) {
-			internal->multiPatchHint = new MultiPatchHint;
-			APP->scene->addChild(internal->multiPatchHint);
+		if (hoveredPw) {
+			internal->multiPatchHoveredPort = hoveredPw;
+			internal->multiPatchHoveredAction = getMultiPatchAction(hoveredPw);
+			// Remember the cable the click would take, to mark what is about to be captured
+			if (internal->multiPatchHoveredAction == MULTI_PATCH_ACTION_GRAB || internal->multiPatchHoveredAction == MULTI_PATCH_ACTION_CLONE)
+				internal->multiPatchHoveredCable = getMultiPatchGrabCable(this, hoveredPw);
 		}
-		internal->multiPatchHoveredPort = hoveredPw;
-		internal->multiPatchHoveredAction = hoveredPw ? getMultiPatchAction(hoveredPw) : MULTI_PATCH_ACTION_NONE;
-		internal->multiPatchHint->text = getMultiPatchHintText(this, internal, hoveredPw);
+	}
+
+	// Snap the next multi-patch cable to the hovered port, like a dragged cable
+	if (internal->multiPatching) {
+		PortWidget* hoveredPw = internal->multiPatchHoveredPort.get();
 
 		// Only a port that would receive the next cable snaps it
 		if (hoveredPw && !(canMultiPatchPort(hoveredPw) && hoveredPw->type == internal->multiPatchFreeType))
@@ -355,17 +353,38 @@ void RackWidget::draw(const DrawArgs& args) {
 	}
 
 	// Draw the badge for the hovered port on top of the cables
-	if (internal->multiPatching) {
+	{
 		PortWidget* pw = internal->multiPatchHoveredPort.get();
+		CableWidget* cw = internal->multiPatchHoveredCable.get();
 		if (pw) {
-			math::Vec pos = pw->getRelativeOffset(pw->box.size.div(2), this);
 			NVGcolor color;
-			if (internal->multiPatchHoveredAction == MULTI_PATCH_ACTION_PATCH)
+			if (cw)
+				// Wear the color of the cable about to be captured
+				color = cw->color;
+			else if (internal->multiPatchHoveredAction == MULTI_PATCH_ACTION_PATCH)
 				color = getMultiPatchColor();
 			else if (internal->multiPatchHoveredAction == MULTI_PATCH_ACTION_NONE)
 				color = nvgRGBf(1.0, 0.4, 0.4);
 			else
 				color = color::WHITE;
+
+			// Mark the end of that cable that would stay plugged in, so it is clear which cable
+			// is about to be captured and where it is anchored
+			if (cw) {
+				engine::Port::Type farType = (pw->type == engine::Port::INPUT) ? engine::Port::OUTPUT : engine::Port::INPUT;
+				PortWidget* farPw = cw->getPort(farType);
+				if (farPw) {
+					math::Vec farPos = farPw->getRelativeOffset(farPw->box.size.div(2), this);
+					float farRadius = std::max(farPw->box.size.x, farPw->box.size.y) / 2 + 5;
+					nvgBeginPath(args.vg);
+					nvgCircle(args.vg, VEC_ARGS(farPos), farRadius);
+					nvgStrokeWidth(args.vg, 1.5);
+					nvgStrokeColor(args.vg, nvgRGBAf(color.r, color.g, color.b, 0.85));
+					nvgStroke(args.vg);
+				}
+			}
+
+			math::Vec pos = pw->getRelativeOffset(pw->box.size.div(2), this);
 			drawMultiPatchBadge(args.vg, pos, internal->multiPatchHoveredAction, color);
 		}
 	}
@@ -1945,13 +1964,8 @@ static void releaseMultiPatchCable(RackWidget* rack, RackWidget::Internal::Multi
 
 void RackWidget::endMultiPatch() {
 	internal->multiPatchHoveredPort.set(NULL);
+	internal->multiPatchHoveredCable.set(NULL);
 	internal->multiPatchHoveredAction = MULTI_PATCH_ACTION_NONE;
-
-	if (internal->multiPatchHint) {
-		APP->scene->removeChild(internal->multiPatchHint);
-		delete internal->multiPatchHint;
-		internal->multiPatchHint = NULL;
-	}
 
 	// Reset the state before releasing the cables, so they are no longer multi-patch cables
 	std::vector<Internal::MultiPatchPort> ports;
@@ -2007,47 +2021,20 @@ bool RackWidget::canMultiPatchPort(PortWidget* pw) {
 	return internal->multiPatchIndex == 0;
 }
 
-/** Builds the text of the hint that follows the cursor while multi-patching. */
-static std::string getMultiPatchHintText(RackWidget* rack, RackWidget::Internal* internal, PortWidget* hoveredPw) {
-	size_t total = internal->multiPatchPorts.size();
-	size_t index = internal->multiPatchIndex;
-	size_t held = (index < total) ? total - index : 0;
-
-	std::string text = (held == 1)
-		? string::translate("RackWidget.multiPatchHeldOne")
-		: string::f(string::translate("RackWidget.multiPatchHeldMany"), (int) held);
-	text += "\n";
-
-	switch (internal->multiPatchHoveredAction) {
-		case RackWidget::MULTI_PATCH_ACTION_PATCH:
-			text += string::f(string::translate("RackWidget.multiPatchPatchHere"), (int) (index + 1), (int) total);
-			break;
-		case RackWidget::MULTI_PATCH_ACTION_GRAB:
-			text += string::translate("RackWidget.multiPatchUnplug");
-			break;
-		case RackWidget::MULTI_PATCH_ACTION_CLONE:
-			text += string::translate("RackWidget.multiPatchDuplicate");
-			break;
-		case RackWidget::MULTI_PATCH_ACTION_CREATE:
-			text += string::translate("RackWidget.multiPatchNewCable");
-			break;
-		case RackWidget::MULTI_PATCH_ACTION_DROP:
-			text += string::translate("RackWidget.multiPatchDrop");
-			break;
-		default:
-			text += string::translate((internal->multiPatchFreeType == engine::Port::INPUT)
-				? "RackWidget.multiPatchClickInputs" : "RackWidget.multiPatchClickOutputs");
-			break;
-	}
-
-	return text;
-}
-
 RackWidget::MultiPatchAction RackWidget::getMultiPatchAction(PortWidget* pw) {
 	return getMultiPatchAction(pw, internal->multiPatchHoverMode);
 }
 
 RackWidget::MultiPatchAction RackWidget::getMultiPatchAction(PortWidget* pw, MultiPatchMode mode) {
+	if (!internal->multiPatching) {
+		// Nothing is collected yet, so report what the click would start the collection with
+		if (!settings::multiPatch || !pw || !pw->module)
+			return MULTI_PATCH_ACTION_NONE;
+		if (mode != MULTI_PATCH_CREATE && getMultiPatchGrabCable(this, pw))
+			return (mode == MULTI_PATCH_CLONE) ? MULTI_PATCH_ACTION_CLONE : MULTI_PATCH_ACTION_GRAB;
+		return MULTI_PATCH_ACTION_CREATE;
+	}
+
 	if (!canMultiPatchPort(pw))
 		return MULTI_PATCH_ACTION_NONE;
 
