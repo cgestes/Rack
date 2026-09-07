@@ -206,6 +206,20 @@ void RackWidget::step() {
 		}
 		internal->multiPatchHint->text = getMultiPatchHintText(this, internal, hoveredPw);
 
+		// Say the same thing with the cursor
+		int cursor = GLFW_ARROW_CURSOR;
+		if (hoveredPw) {
+			switch (getMultiPatchAction(hoveredPw)) {
+				// Aim the cable at the port
+				case MULTI_PATCH_ACTION_PATCH: cursor = GLFW_CROSSHAIR_CURSOR; break;
+				// Take a cable from the port
+				case MULTI_PATCH_ACTION_COLLECT: cursor = GLFW_POINTING_HAND_CURSOR; break;
+				// The port won't accept the click
+				default: cursor = GLFW_NOT_ALLOWED_CURSOR; break;
+			}
+		}
+		APP->window->setCursor(cursor);
+
 		// Only a port that would receive the next cable snaps it
 		if (hoveredPw && !(canMultiPatchPort(hoveredPw) && hoveredPw->type == internal->multiPatchFreeType))
 			hoveredPw = NULL;
@@ -1858,6 +1872,9 @@ static void releaseMultiPatchCable(RackWidget* rack, RackWidget::Internal::Multi
 }
 
 void RackWidget::endMultiPatch() {
+	if (internal->multiPatching)
+		APP->window->setCursor(GLFW_ARROW_CURSOR);
+
 	if (internal->multiPatchHint) {
 		APP->scene->removeChild(internal->multiPatchHint);
 		delete internal->multiPatchHint;
