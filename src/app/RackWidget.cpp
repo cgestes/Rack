@@ -2039,18 +2039,29 @@ RackWidget::MultiPatchAction RackWidget::getMultiPatchAction(PortWidget* pw, Mul
 		return MULTI_PATCH_ACTION_NONE;
 
 	if (internal->multiPatchIndex == 0) {
-		// Clicking a collected port again drops it from the collection
+		bool collected = false;
 		for (const Internal::MultiPatchPort& p : internal->multiPatchPorts) {
-			if (p.port.get() == pw)
-				return MULTI_PATCH_ACTION_DROP;
+			if (p.port.get() == pw) {
+				collected = true;
+				break;
+			}
 		}
+
 		// Only a cable whose free end matches the collection can be collected, so a port of the
 		// other type collects by starting a new cable, and a port of the free type by taking the
 		// plug that is in it
 		if (pw->type != internal->multiPatchFreeType)
-			return MULTI_PATCH_ACTION_CREATE;
+			return collected ? MULTI_PATCH_ACTION_DROP : MULTI_PATCH_ACTION_CREATE;
+
+		// Take a cable while the port still has one. Unplugging removes it from the port, so a
+		// port with several cables stacked on it gives them up one click at a time, rather than
+		// offering to put the first one back while the rest are still plugged in.
 		if (internal->multiPatchGrabMode && mode != MULTI_PATCH_CREATE && getMultiPatchGrabCable(this, pw))
 			return (mode == MULTI_PATCH_CLONE) ? MULTI_PATCH_ACTION_CLONE : MULTI_PATCH_ACTION_GRAB;
+
+		// The port has nothing left to take, so offer to put back what was taken from it
+		if (collected)
+			return MULTI_PATCH_ACTION_DROP;
 	}
 
 	return MULTI_PATCH_ACTION_PATCH;
