@@ -91,6 +91,14 @@ extern std::vector<std::string> cableLabels;
 extern bool cableAutoRotate;
 /** Clicking a port collects it for patching multiple cables at once. */
 extern bool multiPatch;
+/** Which gesture takes a cable off a port while multi-patching. */
+enum MultiPatchTakeMode {
+	/** A plain click takes the first cable, the modifier keys take the rest. */
+	MULTI_PATCH_TAKE_CLICK,
+	/** Only the modifier keys ever take a cable, so a plain click always lays one. */
+	MULTI_PATCH_TAKE_MODIFIER,
+};
+extern MultiPatchTakeMode multiPatchTake;
 extern bool autoCheckUpdates;
 extern bool verifyHttpsCerts;
 extern bool showTipsOnLaunch;

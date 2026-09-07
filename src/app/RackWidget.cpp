@@ -2049,7 +2049,10 @@ RackWidget::MultiPatchAction RackWidget::getMultiPatchAction(const MultiPatchSta
 		// Nothing is collected yet, so report what the click would start the collection with.
 		// Taking the port's cable hands over the plug that is in it, so the collection is patched
 		// into ports of this type; a new cable hands over a plug for the opposite type instead.
-		if (mode != MULTI_PATCH_CREATE && state.canTake)
+		// Which gesture takes is the one thing the two schemes disagree on: either a plain click
+		// takes this first cable and the modifiers take the rest, or the modifiers take every one.
+		MultiPatchMode takeMode = state.takeNeedsModifier ? MULTI_PATCH_GRAB : MULTI_PATCH_CREATE;
+		if (mode != takeMode && state.canTake)
 			return (mode == MULTI_PATCH_CLONE) ? MULTI_PATCH_ACTION_CLONE : MULTI_PATCH_ACTION_GRAB;
 		return MULTI_PATCH_ACTION_CREATE;
 	}
@@ -2091,6 +2094,7 @@ RackWidget::MultiPatchAction RackWidget::getMultiPatchAction(PortWidget* pw, Mul
 	state.patching = (internal->multiPatchIndex > 0);
 	state.freeType = (pw->type == internal->multiPatchFreeType);
 	state.canTake = (getMultiPatchTakeCable(this, internal, pw) != NULL);
+	state.takeNeedsModifier = (settings::multiPatchTake == settings::MULTI_PATCH_TAKE_MODIFIER);
 	for (const Internal::MultiPatchPort& p : internal->multiPatchPorts) {
 		if (p.port.get() == pw) {
 			state.collected = true;

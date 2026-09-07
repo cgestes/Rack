@@ -55,25 +55,42 @@ static void check(const std::string& name, const State& state, Mode mode, Action
 }
 
 
-/** Nothing collected yet: the click decides what the collection starts with. */
+/** Nothing collected yet: the click decides what the collection starts with.
+This is the only place the two take schemes differ.
+*/
 static void testStartingACollection() {
-	State empty;
-	// A port with no cable has nothing to take, so every gesture starts a new cable
-	check("start, empty port", empty, CLICK, RackWidget::MULTI_PATCH_ACTION_CREATE);
-	check("start, empty port", empty, CTRL, RackWidget::MULTI_PATCH_ACTION_CREATE);
-	check("start, empty port", empty, CTRL_SHIFT, RackWidget::MULTI_PATCH_ACTION_CREATE);
+	for (bool takeNeedsModifier : {false, true}) {
+		std::string scheme = takeNeedsModifier ? " [modifier takes]" : " [click takes first]";
 
-	State patched;
-	patched.canTake = true;
-	// A patched port gives up its cable, unless Ctrl asks for a new one
-	check("start, patched port", patched, CLICK, RackWidget::MULTI_PATCH_ACTION_GRAB);
-	check("start, patched port", patched, CTRL, RackWidget::MULTI_PATCH_ACTION_CREATE);
-	check("start, patched port", patched, CTRL_SHIFT, RackWidget::MULTI_PATCH_ACTION_CLONE);
+		State empty;
+		empty.takeNeedsModifier = takeNeedsModifier;
+		// A port with no cable has nothing to take, so every gesture starts a new cable
+		check("start, empty port" + scheme, empty, CLICK, RackWidget::MULTI_PATCH_ACTION_CREATE);
+		check("start, empty port" + scheme, empty, CTRL, RackWidget::MULTI_PATCH_ACTION_CREATE);
+		check("start, empty port" + scheme, empty, CTRL_SHIFT, RackWidget::MULTI_PATCH_ACTION_CREATE);
+
+		State patched = empty;
+		patched.canTake = true;
+		// Ctrl+shift duplicates the cable under either scheme, so the shift layer never changes
+		check("start, patched port" + scheme, patched, CTRL_SHIFT, RackWidget::MULTI_PATCH_ACTION_CLONE);
+
+		if (takeNeedsModifier) {
+			// A plain click lays a cable rather than taking one, so taking is always Ctrl
+			check("start, patched port" + scheme, patched, CLICK, RackWidget::MULTI_PATCH_ACTION_CREATE);
+			check("start, patched port" + scheme, patched, CTRL, RackWidget::MULTI_PATCH_ACTION_GRAB);
+		}
+		else {
+			// A plain click takes this first cable, and Ctrl asks for a new one instead
+			check("start, patched port" + scheme, patched, CLICK, RackWidget::MULTI_PATCH_ACTION_GRAB);
+			check("start, patched port" + scheme, patched, CTRL, RackWidget::MULTI_PATCH_ACTION_CREATE);
+		}
+	}
 }
 
 /** Cables are held and none has been patched: ports of the free type can still give up cables. */
-static void testCollectingOnTheFreeType() {
+static void testCollectingOnTheFreeType(bool takeNeedsModifier) {
 	State s;
+	s.takeNeedsModifier = takeNeedsModifier;
 	s.collecting = true;
 	s.freeType = true;
 
@@ -98,8 +115,9 @@ static void testCollectingOnTheFreeType() {
 }
 
 /** Ports of the other type can only ever start new cables, never hand over their own plug. */
-static void testCollectingOnTheOtherType() {
+static void testCollectingOnTheOtherType(bool takeNeedsModifier) {
 	State s;
+	s.takeNeedsModifier = takeNeedsModifier;
 	s.collecting = true;
 	s.freeType = false;
 
@@ -121,8 +139,9 @@ static void testCollectingOnTheOtherType() {
 }
 
 /** Once a cable has been patched the collection can only shrink. */
-static void testPatching() {
+static void testPatching(bool takeNeedsModifier) {
 	State s;
+	s.takeNeedsModifier = takeNeedsModifier;
 	s.collecting = true;
 	s.patching = true;
 	s.freeType = true;
@@ -142,7 +161,7 @@ static void testPatching() {
 }
 
 /** Every click either takes a cable of the collection's free end, or spends one. */
-static void testEveryStateKeepsTheFreeEnd() {
+static void testEveryStateKeepsTheFreeEnd(bool takeNeedsModifier) {
 	for (int i = 0; i < 32; i++) {
 		State s;
 		s.collecting = (i & 1);
@@ -150,6 +169,7 @@ static void testEveryStateKeepsTheFreeEnd() {
 		s.freeType = (i & 4);
 		s.collected = (i & 8);
 		s.canTake = (i & 16);
+		s.takeNeedsModifier = takeNeedsModifier;
 		if (!s.collecting && s.patching)
 			continue;
 
@@ -182,10 +202,13 @@ static void testEveryStateKeepsTheFreeEnd() {
 
 int main() {
 	testStartingACollection();
-	testCollectingOnTheFreeType();
-	testCollectingOnTheOtherType();
-	testPatching();
-	testEveryStateKeepsTheFreeEnd();
+	// Both take schemes agree once cables are held, so every later case is checked under each
+	for (bool takeNeedsModifier : {false, true}) {
+		testCollectingOnTheFreeType(takeNeedsModifier);
+		testCollectingOnTheOtherType(takeNeedsModifier);
+		testPatching(takeNeedsModifier);
+		testEveryStateKeepsTheFreeEnd(takeNeedsModifier);
+	}
 
 	std::printf("%d checks, %d failures\n", checks, failures);
 	return failures ? 1 : 0;

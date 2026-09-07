@@ -204,6 +204,8 @@ struct RackWidget : widget::OpaqueWidget {
 		bool collected = false;
 		/** Whether the port still has a cable the collection hasn't taken. */
 		bool canTake = false;
+		/** Whether taking a cable always needs a modifier key, from settings::multiPatchTake. */
+		bool takeNeedsModifier = false;
 	};
 	/** Decides what clicking a port does from the state it is in.
 	Pure, so the rules can be tested without a rack.

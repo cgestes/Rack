@@ -598,6 +598,20 @@ struct ViewButton : MenuButton {
 
 		menu->addChild(createBoolPtrMenuItem(string::translate("MenuBar.view.multiPatch"), "", &settings::multiPatch));
 
+		static const std::string takeKey = widget::getKeyCommandName(0, RACK_MOD_CTRL) + string::translate("key.click");
+		static const std::vector<std::string> multiPatchTakeLabels = {
+			string::f(string::translate("MenuBar.view.multiPatchTake.click").c_str(), takeKey.c_str()),
+			string::f(string::translate("MenuBar.view.multiPatchTake.modifier").c_str(), takeKey.c_str()),
+		};
+		menu->addChild(createIndexSubmenuItem(string::translate("MenuBar.view.multiPatchTake"), multiPatchTakeLabels,
+			[=]() -> size_t {
+				return settings::multiPatchTake;
+			},
+			[=](size_t i) {
+				settings::multiPatchTake = (settings::MultiPatchTakeMode) i;
+			}
+		));
+
 		menu->addChild(new ui::MenuSeparator);
 		menu->addChild(createMenuLabel(string::translate("MenuBar.view.parameters")));
 
