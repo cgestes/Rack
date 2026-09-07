@@ -120,6 +120,10 @@ struct RackWidget::Internal {
 		WeakPtr<PortWidget> grabbedPort;
 		/** Owned. Pushed to the history if the grabbed cable is patched, deleted if it is put back. */
 		history::CableRemove* grabHistory = NULL;
+		/** Cable this one was taken from, so a port gives up its cables one at a time. Same as
+		`cable` when it was unplugged, the original when it was duplicated, null when it is new.
+		*/
+		WeakPtr<CableWidget> sourceCable;
 	};
 	/** Collected ports, in the order they will be patched. */
 	std::vector<MultiPatchPort> multiPatchPorts;
@@ -139,7 +143,7 @@ struct RackWidget::Internal {
 };
 
 
-static CableWidget* getMultiPatchGrabCable(RackWidget* rack, PortWidget* pw);
+static CableWidget* getMultiPatchTakeCable(RackWidget* rack, RackWidget::Internal* internal, PortWidget* pw);
 
 
 /** Creates a new Module and ModuleWidget */
@@ -266,7 +270,7 @@ void RackWidget::step() {
 			internal->multiPatchHoveredAction = getMultiPatchAction(hoveredPw);
 			// Remember the cable the click would take, to mark what is about to be captured
 			if (internal->multiPatchHoveredAction == MULTI_PATCH_ACTION_GRAB || internal->multiPatchHoveredAction == MULTI_PATCH_ACTION_CLONE)
-				internal->multiPatchHoveredCable = getMultiPatchGrabCable(this, hoveredPw);
+				internal->multiPatchHoveredCable = getMultiPatchTakeCable(this, internal, hoveredPw);
 		}
 	}
 
@@ -1891,12 +1895,33 @@ static CableWidget* createMultiPatchCable(RackWidget* rack, PortWidget* pw) {
 	return cw;
 }
 
-/** Returns the port's top cable if it can be unplugged and carried by the cursor. */
-static CableWidget* getMultiPatchGrabCable(RackWidget* rack, PortWidget* pw) {
-	CableWidget* cw = rack->getTopCable(pw);
-	if (cw && !cw->isComplete())
-		cw = NULL;
-	return cw;
+/** Returns the topmost cable on the port that the collection hasn't taken yet.
+Unplugged cables are no longer on the port, but duplicated ones still are, so they are skipped by
+looking them up in the collection. This lets a port with several cables stacked on it give them up
+one click at a time whether they are being unplugged or duplicated.
+*/
+static CableWidget* getMultiPatchTakeCable(RackWidget* rack, RackWidget::Internal* internal, PortWidget* pw) {
+	widget::Widget* plugContainer = rack->getPlugContainer();
+	for (auto it = plugContainer->children.rbegin(); it != plugContainer->children.rend(); it++) {
+		PlugWidget* plug = dynamic_cast<PlugWidget*>(*it);
+		assert(plug);
+		CableWidget* cw = plug->getCable();
+		if (cw->getPort(plug->getType()) != pw)
+			continue;
+		if (!cw->isComplete())
+			continue;
+
+		bool taken = false;
+		for (const RackWidget::Internal::MultiPatchPort& p : internal->multiPatchPorts) {
+			if (p.sourceCable.get() == cw) {
+				taken = true;
+				break;
+			}
+		}
+		if (!taken)
+			return cw;
+	}
+	return NULL;
 }
 
 /** Collects a cable from the port, leaving its free end on the cursor.
@@ -1904,9 +1929,9 @@ MULTI_PATCH_GRAB unplugs the port's top cable and MULTI_PATCH_CLONE duplicates i
 over the plug that was in this port. Otherwise a new cable is attached to the port, handing over a
 plug for the opposite type instead.
 */
-static void collectMultiPatchCable(RackWidget* rack, RackWidget::Internal::MultiPatchPort& p, PortWidget* pw, RackWidget::MultiPatchMode mode) {
+static void collectMultiPatchCable(RackWidget* rack, RackWidget::Internal* internal, RackWidget::Internal::MultiPatchPort& p, PortWidget* pw, RackWidget::MultiPatchMode mode) {
 	engine::Port::Type otherType = (pw->type == engine::Port::INPUT) ? engine::Port::OUTPUT : engine::Port::INPUT;
-	CableWidget* topCw = (mode != RackWidget::MULTI_PATCH_CREATE) ? getMultiPatchGrabCable(rack, pw) : NULL;
+	CableWidget* topCw = (mode != RackWidget::MULTI_PATCH_CREATE) ? getMultiPatchTakeCable(rack, internal, pw) : NULL;
 	CableWidget* cw;
 
 	if (topCw && mode == RackWidget::MULTI_PATCH_GRAB) {
@@ -1932,6 +1957,7 @@ static void collectMultiPatchCable(RackWidget* rack, RackWidget::Internal::Multi
 
 	p.port = pw;
 	p.cable = cw;
+	p.sourceCable = topCw;
 }
 
 /** Plugs a grabbed cable back in where it came from, or removes a cable that was created.
@@ -2030,7 +2056,7 @@ RackWidget::MultiPatchAction RackWidget::getMultiPatchAction(PortWidget* pw, Mul
 		// Nothing is collected yet, so report what the click would start the collection with
 		if (!settings::multiPatch || !pw || !pw->module)
 			return MULTI_PATCH_ACTION_NONE;
-		if (mode != MULTI_PATCH_CREATE && getMultiPatchGrabCable(this, pw))
+		if (mode != MULTI_PATCH_CREATE && getMultiPatchTakeCable(this, internal, pw))
 			return (mode == MULTI_PATCH_CLONE) ? MULTI_PATCH_ACTION_CLONE : MULTI_PATCH_ACTION_GRAB;
 		return MULTI_PATCH_ACTION_CREATE;
 	}
@@ -2050,13 +2076,17 @@ RackWidget::MultiPatchAction RackWidget::getMultiPatchAction(PortWidget* pw, Mul
 		// Only a cable whose free end matches the collection can be collected, so a port of the
 		// other type collects by starting a new cable, and a port of the free type by taking the
 		// plug that is in it
-		if (pw->type != internal->multiPatchFreeType)
-			return collected ? MULTI_PATCH_ACTION_DROP : MULTI_PATCH_ACTION_CREATE;
+		if (pw->type != internal->multiPatchFreeType) {
+			// Ctrl asks for another new cable, so it keeps multing the port instead of offering to
+			// put the last one back
+			if (mode == MULTI_PATCH_CREATE || !collected)
+				return MULTI_PATCH_ACTION_CREATE;
+			return MULTI_PATCH_ACTION_DROP;
+		}
 
-		// Take a cable while the port still has one. Unplugging removes it from the port, so a
-		// port with several cables stacked on it gives them up one click at a time, rather than
-		// offering to put the first one back while the rest are still plugged in.
-		if (internal->multiPatchGrabMode && mode != MULTI_PATCH_CREATE && getMultiPatchGrabCable(this, pw))
+		// Take a cable while the port still has one it hasn't given up, so a port with several
+		// cables stacked on it gives them up one click at a time, unplugged or duplicated
+		if (internal->multiPatchGrabMode && mode != MULTI_PATCH_CREATE && getMultiPatchTakeCable(this, internal, pw))
 			return (mode == MULTI_PATCH_CLONE) ? MULTI_PATCH_ACTION_CLONE : MULTI_PATCH_ACTION_GRAB;
 
 		// The port has nothing left to take, so offer to put back what was taken from it
@@ -2105,7 +2135,7 @@ void RackWidget::multiPatchPort(PortWidget* pw, MultiPatchMode mode) {
 	engine::Port::Type otherType = (pw->type == engine::Port::INPUT) ? engine::Port::OUTPUT : engine::Port::INPUT;
 	// Unplugging and duplicating both hand over the plug at this port, so the cable is patched into
 	// a port of this type. A new cable hands over a plug for the opposite type instead.
-	bool takesClickedEnd = (mode != MULTI_PATCH_CREATE) && getMultiPatchGrabCable(this, pw);
+	bool takesClickedEnd = (mode != MULTI_PATCH_CREATE) && getMultiPatchTakeCable(this, internal, pw);
 	engine::Port::Type freeType = takesClickedEnd ? pw->type : otherType;
 
 	// Begin collecting cables
@@ -2114,7 +2144,7 @@ void RackWidget::multiPatchPort(PortWidget* pw, MultiPatchMode mode) {
 		internal->multiPatchIndex = 0;
 
 		Internal::MultiPatchPort p;
-		collectMultiPatchCable(this, p, pw, mode);
+		collectMultiPatchCable(this, internal, p, pw, mode);
 		internal->multiPatchPorts.push_back(p);
 
 		// The first click sets the side the collection's free ends are on, so later clicks on ports
@@ -2155,7 +2185,7 @@ void RackWidget::multiPatchPort(PortWidget* pw, MultiPatchMode mode) {
 			mode = MULTI_PATCH_CREATE;
 
 		Internal::MultiPatchPort p;
-		collectMultiPatchCable(this, p, pw, mode);
+		collectMultiPatchCable(this, internal, p, pw, mode);
 		ports.push_back(p);
 		return;
 	}
