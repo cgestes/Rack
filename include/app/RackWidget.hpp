@@ -177,6 +177,20 @@ struct RackWidget : widget::OpaqueWidget {
 		MULTI_PATCH_CLONE,
 	};
 	PRIVATE void multiPatchPort(PortWidget* pw, MultiPatchMode mode);
+	/** What clicking a port would do while multi-patching, for previewing the click. */
+	enum MultiPatchAction {
+		/** Nothing, because the port would not accept the click. */
+		MULTI_PATCH_ACTION_NONE,
+		/** Collect a cable from the port, or drop it from the collection if already collected. */
+		MULTI_PATCH_ACTION_COLLECT,
+		/** Patch the next collected cable into the port. */
+		MULTI_PATCH_ACTION_PATCH,
+	};
+	/** Returns what clicking the port would do with the modifier keys currently held. */
+	MultiPatchAction getMultiPatchAction(PortWidget* pw);
+	PRIVATE MultiPatchAction getMultiPatchAction(PortWidget* pw, MultiPatchMode mode);
+	/** Returns the color of the cable that the next patch click would use. */
+	NVGcolor getMultiPatchColor();
 	/** Stops multi-patching and pushes the created cables to the history. */
 	void endMultiPatch();
 	bool isMultiPatching();

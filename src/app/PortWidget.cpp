@@ -50,6 +50,36 @@ struct PortWidget::Internal {
 static const float CLICK_DISTANCE = 6.f;
 
 
+/** Draws a halo behind a port, marking what a multi-patch click would do to it.
+Ports that would receive the next cable get a filled halo in that cable's color, ports that would
+be collected get a plain outline. The halo reaches past the port so it stays visible around a plug.
+*/
+static void drawMultiPatchHalo(NVGcontext* vg, math::Vec size, NVGcolor color, bool patch) {
+	math::Vec c = size.div(2);
+	float r = std::max(size.x, size.y) / 2;
+
+	if (patch) {
+		float outer = r + 8;
+		NVGcolor inner = color;
+		inner.a = 0.45;
+		NVGcolor edge = color;
+		edge.a = 0.0;
+		nvgBeginPath(vg);
+		nvgCircle(vg, VEC_ARGS(c), outer);
+		nvgFillPaint(vg, nvgRadialGradient(vg, VEC_ARGS(c), r, outer, inner, edge));
+		nvgFill(vg);
+	}
+
+	NVGcolor stroke = color;
+	stroke.a = patch ? 0.9 : 0.3;
+	nvgBeginPath(vg);
+	nvgCircle(vg, VEC_ARGS(c), r + 2.5);
+	nvgStrokeWidth(vg, patch ? 1.5 : 1.0);
+	nvgStrokeColor(vg, stroke);
+	nvgStroke(vg);
+}
+
+
 struct PortTooltip : ui::Tooltip {
 	/** Weak so that a tooltip outliving its PortWidget can't dereference it. */
 	WeakPtr<PortWidget> portWidget;
@@ -427,9 +457,19 @@ void PortWidget::draw(const DrawArgs& args) {
 			nvgTint(args.vg, nvgRGBf(0.33, 0.33, 0.33));
 		}
 	}
-	else if (module && APP->scene->rack->isMultiPatching() && !APP->scene->rack->canMultiPatchPort(this)) {
-		// Dim the PortWidget if multi-patching cannot patch into it
-		nvgTint(args.vg, nvgRGBf(0.33, 0.33, 0.33));
+	else if (module && APP->scene->rack->isMultiPatching()) {
+		// Show what clicking this PortWidget would do
+		RackWidget::MultiPatchAction action = APP->scene->rack->getMultiPatchAction(this);
+		if (action == RackWidget::MULTI_PATCH_ACTION_NONE) {
+			// Dim the PortWidget if it wouldn't accept the click
+			nvgTint(args.vg, nvgRGBf(0.33, 0.33, 0.33));
+		}
+		else {
+			bool patch = (action == RackWidget::MULTI_PATCH_ACTION_PATCH);
+			NVGcolor color = patch ? APP->scene->rack->getMultiPatchColor() : color::WHITE;
+			// Draw behind the port graphic, so the halo reads as a ring around it
+			drawMultiPatchHalo(args.vg, box.size, color, patch);
+		}
 	}
 	Widget::draw(args);
 }
